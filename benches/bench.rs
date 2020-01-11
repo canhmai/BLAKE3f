@@ -1,13 +1,9 @@
-#![feature(test)]
-
-extern crate test;
-
 use arrayref::array_ref;
 use arrayvec::ArrayVec;
+use bencher::{benchmark_group, benchmark_main, Bencher};
 use blake3::platform::MAX_SIMD_DEGREE;
 use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN};
 use rand::prelude::*;
-use test::Bencher;
 
 const KIB: usize = 1024;
 
@@ -48,6 +44,8 @@ impl RandomInput {
     }
 }
 
+fn dummy(_: &mut Bencher) {}
+
 type CompressInPlaceFn =
     unsafe fn(cv: &mut [u32; 8], block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8);
 
@@ -60,12 +58,10 @@ fn bench_single_compression_fn(b: &mut Bencher, f: CompressInPlaceFn) {
     }
 }
 
-#[bench]
 fn bench_single_compression_portable(b: &mut Bencher) {
     bench_single_compression_fn(b, blake3::portable::compress_in_place);
 }
 
-#[bench]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn bench_single_compression_sse41(b: &mut Bencher) {
     if !blake3::platform::sse41_detected() {
@@ -74,7 +70,6 @@ fn bench_single_compression_sse41(b: &mut Bencher) {
     bench_single_compression_fn(b, blake3::sse41::compress_in_place);
 }
 
-#[bench]
 #[cfg(feature = "c_avx512")]
 fn bench_single_compression_avx512(b: &mut Bencher) {
     if !blake3::platform::avx512_detected() {
@@ -121,7 +116,6 @@ fn bench_many_chunks_fn(b: &mut Bencher, f: HashManyFn<[u8; CHUNK_LEN]>, degree:
     }
 }
 
-#[bench]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn bench_many_chunks_sse41(b: &mut Bencher) {
     if !blake3::platform::sse41_detected() {
@@ -130,7 +124,6 @@ fn bench_many_chunks_sse41(b: &mut Bencher) {
     bench_many_chunks_fn(b, blake3::sse41::hash_many, blake3::sse41::DEGREE);
 }
 
-#[bench]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn bench_many_chunks_avx2(b: &mut Bencher) {
     if !blake3::platform::avx2_detected() {
@@ -139,7 +132,6 @@ fn bench_many_chunks_avx2(b: &mut Bencher) {
     bench_many_chunks_fn(b, blake3::avx2::hash_many, blake3::avx2::DEGREE);
 }
 
-#[bench]
 #[cfg(feature = "c_avx512")]
 fn bench_many_chunks_avx512(b: &mut Bencher) {
     if !blake3::platform::avx512_detected() {
@@ -148,7 +140,6 @@ fn bench_many_chunks_avx512(b: &mut Bencher) {
     bench_many_chunks_fn(b, blake3::c_avx512::hash_many, blake3::c_avx512::DEGREE);
 }
 
-#[bench]
 #[cfg(feature = "c_neon")]
 fn bench_many_chunks_neon(b: &mut Bencher) {
     // When "c_neon" is on, NEON support is assumed.
@@ -183,7 +174,6 @@ fn bench_many_parents_fn(b: &mut Bencher, f: HashManyFn<[u8; BLOCK_LEN]>, degree
     }
 }
 
-#[bench]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn bench_many_parents_sse41(b: &mut Bencher) {
     if !blake3::platform::sse41_detected() {
@@ -192,7 +182,6 @@ fn bench_many_parents_sse41(b: &mut Bencher) {
     bench_many_parents_fn(b, blake3::sse41::hash_many, blake3::sse41::DEGREE);
 }
 
-#[bench]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn bench_many_parents_avx2(b: &mut Bencher) {
     if !blake3::platform::avx2_detected() {
@@ -201,7 +190,6 @@ fn bench_many_parents_avx2(b: &mut Bencher) {
     bench_many_parents_fn(b, blake3::avx2::hash_many, blake3::avx2::DEGREE);
 }
 
-#[bench]
 #[cfg(feature = "c_avx512")]
 fn bench_many_parents_avx512(b: &mut Bencher) {
     if !blake3::platform::avx512_detected() {
@@ -210,142 +198,178 @@ fn bench_many_parents_avx512(b: &mut Bencher) {
     bench_many_parents_fn(b, blake3::c_avx512::hash_many, blake3::c_avx512::DEGREE);
 }
 
-#[bench]
 #[cfg(feature = "c_neon")]
 fn bench_many_parents_neon(b: &mut Bencher) {
     // When "c_neon" is on, NEON support is assumed.
     bench_many_parents_fn(b, blake3::c_neon::hash_many, blake3::c_neon::DEGREE);
 }
 
+benchmark_group!(portable, bench_single_compression_portable);
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+benchmark_group!(
+    x86,
+    bench_single_compression_sse41,
+    bench_many_chunks_sse41,
+    bench_many_chunks_avx2,
+    bench_many_parents_sse41,
+    bench_many_parents_avx2
+);
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+benchmark_group!(x86, dummy);
+
+#[cfg(feature = "c_avx512")]
+benchmark_group!(
+    avx512,
+    bench_single_compression_avx512,
+    bench_many_chunks_avx512,
+    bench_many_parents_avx512
+);
+#[cfg(not(feature = "c_avx512"))]
+benchmark_group!(avx512, dummy);
+
+#[cfg(feature = "c_neon")]
+benchmark_group!(neon, bench_many_chunks_neon, bench_many_parents_neon);
+#[cfg(not(feature = "c_neon"))]
+benchmark_group!(neon, dummy);
+
 fn bench_atonce(b: &mut Bencher, len: usize) {
     let mut input = RandomInput::new(b, len);
     b.iter(|| blake3::hash(input.get()));
 }
 
-#[bench]
 fn bench_atonce_0001_block(b: &mut Bencher) {
     bench_atonce(b, BLOCK_LEN);
 }
 
-#[bench]
 fn bench_atonce_0001_kib(b: &mut Bencher) {
     bench_atonce(b, 1 * KIB);
 }
 
-#[bench]
 fn bench_atonce_0002_kib(b: &mut Bencher) {
     bench_atonce(b, 2 * KIB);
 }
 
-#[bench]
 fn bench_atonce_0004_kib(b: &mut Bencher) {
     bench_atonce(b, 4 * KIB);
 }
 
-#[bench]
 fn bench_atonce_0008_kib(b: &mut Bencher) {
     bench_atonce(b, 8 * KIB);
 }
 
-#[bench]
 fn bench_atonce_0016_kib(b: &mut Bencher) {
     bench_atonce(b, 16 * KIB);
 }
 
-#[bench]
 fn bench_atonce_0032_kib(b: &mut Bencher) {
     bench_atonce(b, 32 * KIB);
 }
 
-#[bench]
 fn bench_atonce_0064_kib(b: &mut Bencher) {
     bench_atonce(b, 64 * KIB);
 }
 
-#[bench]
 fn bench_atonce_0128_kib(b: &mut Bencher) {
     bench_atonce(b, 128 * KIB);
 }
 
-#[bench]
 fn bench_atonce_0256_kib(b: &mut Bencher) {
     bench_atonce(b, 256 * KIB);
 }
 
-#[bench]
 fn bench_atonce_0512_kib(b: &mut Bencher) {
     bench_atonce(b, 512 * KIB);
 }
 
-#[bench]
 fn bench_atonce_1024_kib(b: &mut Bencher) {
     bench_atonce(b, 1024 * KIB);
 }
+
+benchmark_group!(
+    atonce,
+    bench_atonce_0001_block,
+    bench_atonce_0001_kib,
+    bench_atonce_0002_kib,
+    bench_atonce_0004_kib,
+    bench_atonce_0008_kib,
+    bench_atonce_0016_kib,
+    bench_atonce_0032_kib,
+    bench_atonce_0064_kib,
+    bench_atonce_0128_kib,
+    bench_atonce_0256_kib,
+    bench_atonce_0512_kib,
+    bench_atonce_1024_kib
+);
 
 fn bench_incremental(b: &mut Bencher, len: usize) {
     let mut input = RandomInput::new(b, len);
     b.iter(|| blake3::Hasher::new().update(input.get()).finalize());
 }
 
-#[bench]
 fn bench_incremental_0001_block(b: &mut Bencher) {
     bench_incremental(b, BLOCK_LEN);
 }
 
-#[bench]
 fn bench_incremental_0001_kib(b: &mut Bencher) {
     bench_incremental(b, 1 * KIB);
 }
 
-#[bench]
 fn bench_incremental_0002_kib(b: &mut Bencher) {
     bench_incremental(b, 2 * KIB);
 }
 
-#[bench]
 fn bench_incremental_0004_kib(b: &mut Bencher) {
     bench_incremental(b, 4 * KIB);
 }
 
-#[bench]
 fn bench_incremental_0008_kib(b: &mut Bencher) {
     bench_incremental(b, 8 * KIB);
 }
 
-#[bench]
 fn bench_incremental_0016_kib(b: &mut Bencher) {
     bench_incremental(b, 16 * KIB);
 }
 
-#[bench]
 fn bench_incremental_0032_kib(b: &mut Bencher) {
     bench_incremental(b, 32 * KIB);
 }
 
-#[bench]
 fn bench_incremental_0064_kib(b: &mut Bencher) {
     bench_incremental(b, 64 * KIB);
 }
 
-#[bench]
 fn bench_incremental_0128_kib(b: &mut Bencher) {
     bench_incremental(b, 128 * KIB);
 }
 
-#[bench]
 fn bench_incremental_0256_kib(b: &mut Bencher) {
     bench_incremental(b, 256 * KIB);
 }
 
-#[bench]
 fn bench_incremental_0512_kib(b: &mut Bencher) {
     bench_incremental(b, 512 * KIB);
 }
 
-#[bench]
 fn bench_incremental_1024_kib(b: &mut Bencher) {
     bench_incremental(b, 1024 * KIB);
 }
+
+benchmark_group!(
+    incremental,
+    bench_incremental_0001_block,
+    bench_incremental_0001_kib,
+    bench_incremental_0002_kib,
+    bench_incremental_0004_kib,
+    bench_incremental_0008_kib,
+    bench_incremental_0016_kib,
+    bench_incremental_0032_kib,
+    bench_incremental_0064_kib,
+    bench_incremental_0128_kib,
+    bench_incremental_0256_kib,
+    bench_incremental_0512_kib,
+    bench_incremental_1024_kib
+);
 
 fn bench_reference(b: &mut Bencher, len: usize) {
     let mut input = RandomInput::new(b, len);
@@ -358,62 +382,68 @@ fn bench_reference(b: &mut Bencher, len: usize) {
     });
 }
 
-#[bench]
 fn bench_reference_0001_block(b: &mut Bencher) {
     bench_reference(b, BLOCK_LEN);
 }
 
-#[bench]
 fn bench_reference_0001_kib(b: &mut Bencher) {
     bench_reference(b, 1 * KIB);
 }
 
-#[bench]
 fn bench_reference_0002_kib(b: &mut Bencher) {
     bench_reference(b, 2 * KIB);
 }
 
-#[bench]
 fn bench_reference_0004_kib(b: &mut Bencher) {
     bench_reference(b, 4 * KIB);
 }
 
-#[bench]
 fn bench_reference_0008_kib(b: &mut Bencher) {
     bench_reference(b, 8 * KIB);
 }
 
-#[bench]
 fn bench_reference_0016_kib(b: &mut Bencher) {
     bench_reference(b, 16 * KIB);
 }
 
-#[bench]
 fn bench_reference_0032_kib(b: &mut Bencher) {
     bench_reference(b, 32 * KIB);
 }
 
-#[bench]
 fn bench_reference_0064_kib(b: &mut Bencher) {
     bench_reference(b, 64 * KIB);
 }
 
-#[bench]
 fn bench_reference_0128_kib(b: &mut Bencher) {
     bench_reference(b, 128 * KIB);
 }
 
-#[bench]
 fn bench_reference_0256_kib(b: &mut Bencher) {
     bench_reference(b, 256 * KIB);
 }
 
-#[bench]
 fn bench_reference_0512_kib(b: &mut Bencher) {
     bench_reference(b, 512 * KIB);
 }
 
-#[bench]
 fn bench_reference_1024_kib(b: &mut Bencher) {
     bench_reference(b, 1024 * KIB);
 }
+
+benchmark_group!(
+    reference,
+    bench_reference_0001_block,
+    bench_reference_0001_kib,
+    bench_reference_0002_kib,
+    bench_reference_0004_kib,
+    bench_reference_0008_kib,
+    bench_reference_0016_kib,
+    bench_reference_0032_kib,
+    bench_reference_0064_kib,
+    bench_reference_0128_kib,
+    bench_reference_0256_kib,
+    bench_reference_0512_kib,
+    bench_reference_1024_kib
+);
+
+benchmark_main!(portable, x86, avx512, neon, atonce, incremental, reference);
