@@ -262,6 +262,14 @@ impl Drop for GpuInstance {
 
 impl GpuInstance {
     pub fn new(task_count: usize, input_buffer_size: usize) -> Result<Option<Self>> {
+        Self::with_flags(task_count, input_buffer_size, false)
+    }
+
+    pub fn with_flags(
+        task_count: usize,
+        input_buffer_size: usize,
+        pipeline_executable_info: bool,
+    ) -> Result<Option<Self>> {
         assert!(
             input_buffer_size.is_power_of_two(),
             "invalid input buffer size"
@@ -292,7 +300,12 @@ impl GpuInstance {
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
-        let device = Self::create_device(&instance, physical_device, queue_family_index)?;
+        let device = Self::create_device(
+            &instance,
+            physical_device,
+            queue_family_index,
+            pipeline_executable_info,
+        )?;
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let command_pool = Self::create_command_pool(&device, queue_family_index)?;
         let command_buffers = Self::allocate_command_buffers(&device, &command_pool, task_count)?;
@@ -309,6 +322,7 @@ impl GpuInstance {
             &pipeline_layout,
             &chunk_shader_module,
             &parent_shader_module,
+            pipeline_executable_info,
         )?;
 
         let output_buffer_sizes = group_counts
@@ -463,13 +477,26 @@ impl GpuInstance {
         instance: &Instance,
         physical_device: vk::PhysicalDevice,
         queue_family_index: u32,
+        pipeline_executable_info: bool,
     ) -> Result<impl Wrap<Device>> {
         let queue_create_info = vk::DeviceQueueCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .queue_priorities(&[0.5]);
 
         let queue_create_infos = [*queue_create_info];
-        let create_info = vk::DeviceCreateInfo::builder().queue_create_infos(&queue_create_infos);
+        let mut create_info =
+            vk::DeviceCreateInfo::builder().queue_create_infos(&queue_create_infos);
+        let enabled_extension_names = [vk::KhrPipelineExecutablePropertiesFn::name().as_ptr()];
+        if pipeline_executable_info {
+            create_info = create_info.enabled_extension_names(&enabled_extension_names);
+        }
+
+        let mut pipeline_executable_properties_features =
+            vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR::builder()
+                .pipeline_executable_info(pipeline_executable_info);
+        if pipeline_executable_info {
+            create_info = create_info.push_next(&mut pipeline_executable_properties_features);
+        }
 
         Ok(Guard::new(
             unsafe { instance.create_device(physical_device, &create_info, None)? },
@@ -587,6 +614,7 @@ impl GpuInstance {
         pipeline_layout: &vk::PipelineLayout,
         chunk_shader_module: &vk::ShaderModule,
         parent_shader_module: &vk::ShaderModule,
+        pipeline_executable_info: bool,
     ) -> Result<(impl Wrap<vk::Pipeline> + 'a, impl Wrap<vk::Pipeline> + 'a)> {
         let main = CStr::from_bytes_with_nul(b"main\0").unwrap();
 
@@ -594,17 +622,29 @@ impl GpuInstance {
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(*chunk_shader_module)
             .name(main);
-        let chunk_create_info = vk::ComputePipelineCreateInfo::builder()
+        let mut chunk_create_info = vk::ComputePipelineCreateInfo::builder()
             .stage(*chunk_stage)
             .layout(*pipeline_layout);
+        if pipeline_executable_info {
+            chunk_create_info = chunk_create_info.flags(
+                vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR
+                    | vk::PipelineCreateFlags::CAPTURE_INTERNAL_REPRESENTATIONS_KHR,
+            );
+        }
 
         let parent_stage = vk::PipelineShaderStageCreateInfo::builder()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(*parent_shader_module)
             .name(main);
-        let parent_create_info = vk::ComputePipelineCreateInfo::builder()
+        let mut parent_create_info = vk::ComputePipelineCreateInfo::builder()
             .stage(*parent_stage)
             .layout(*pipeline_layout);
+        if pipeline_executable_info {
+            parent_create_info = parent_create_info.flags(
+                vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR
+                    | vk::PipelineCreateFlags::CAPTURE_INTERNAL_REPRESENTATIONS_KHR,
+            );
+        }
 
         let create_infos = [*chunk_create_info, *parent_create_info];
         let result = unsafe {
@@ -956,6 +996,162 @@ impl GpuInstance {
         debug_assert!(allocated.is_empty());
 
         Ok((descriptor_pool, descriptor_sets))
+    }
+
+    pub fn dump_pipelines(&mut self) -> Result<()> {
+        unsafe {
+            let pipeline_executable_properties_fn =
+                vk::KhrPipelineExecutablePropertiesFn::load(|name| {
+                    std::mem::transmute(
+                        self.instance
+                            .get_device_proc_addr(self.device.handle(), name.as_ptr()),
+                    )
+                });
+
+            println!("Chunk pipeline:");
+            self.dump_pipeline(&pipeline_executable_properties_fn, self.chunk_pipeline)?;
+
+            println!("Parent pipeline:");
+            self.dump_pipeline(&pipeline_executable_properties_fn, self.parent_pipeline)?;
+
+            Ok(())
+        }
+    }
+
+    fn dump_pipeline(
+        &mut self,
+        pipeline_executable_properties_fn: &vk::KhrPipelineExecutablePropertiesFn,
+        pipeline: vk::Pipeline,
+    ) -> Result<()> {
+        unsafe {
+            let result = |err_code| {
+                if err_code == vk::Result::SUCCESS {
+                    Ok(())
+                } else {
+                    Err(err_code)
+                }
+            };
+
+            let pipeline_info = vk::PipelineInfoKHR::builder().pipeline(pipeline).build();
+            let mut executable_count = 0u32;
+            result(
+                pipeline_executable_properties_fn.get_pipeline_executable_properties_khr(
+                    self.device.handle(),
+                    &pipeline_info as *const _,
+                    &mut executable_count as *mut _,
+                    ptr::null_mut(),
+                ),
+            )?;
+            let mut properties = vec![Default::default(); executable_count as usize];
+            result(
+                pipeline_executable_properties_fn.get_pipeline_executable_properties_khr(
+                    self.device.handle(),
+                    &pipeline_info as *const _,
+                    &mut executable_count as *mut _,
+                    properties.as_mut_ptr(),
+                ),
+            )?;
+            println!("{:#?}", properties);
+
+            for executable_index in 0..properties.len() {
+                let pipeline_executable_info = vk::PipelineExecutableInfoKHR::builder()
+                    .pipeline(pipeline)
+                    .executable_index(executable_index as u32)
+                    .build();
+
+                let mut statistic_count = 0u32;
+                result(
+                    pipeline_executable_properties_fn.get_pipeline_executable_statistics_khr(
+                        self.device.handle(),
+                        &pipeline_executable_info as *const _,
+                        &mut statistic_count as *mut _,
+                        ptr::null_mut(),
+                    ),
+                )?;
+                let mut statistics = vec![Default::default(); statistic_count as usize];
+                result(
+                    pipeline_executable_properties_fn.get_pipeline_executable_statistics_khr(
+                        self.device.handle(),
+                        &pipeline_executable_info as *const _,
+                        &mut statistic_count as *mut _,
+                        statistics.as_mut_ptr(),
+                    ),
+                )?;
+                println!("{:#?}", statistics);
+
+                for statistic in statistics {
+                    let name = CStr::from_ptr(statistic.name.as_ptr() as *const _);
+                    match statistic.format {
+                        vk::PipelineExecutableStatisticFormatKHR::BOOL32 => {
+                            println!("{:#?}: {:#?}", name, statistic.value.b32)
+                        }
+                        vk::PipelineExecutableStatisticFormatKHR::INT64 => {
+                            println!("{:#?}: {:#?}", name, statistic.value.r#i64)
+                        }
+                        vk::PipelineExecutableStatisticFormatKHR::UINT64 => {
+                            println!("{:#?}: {:#?}", name, statistic.value.r#u64)
+                        }
+                        vk::PipelineExecutableStatisticFormatKHR::FLOAT64 => {
+                            println!("{:#?}: {:#?}", name, statistic.value.r#f64)
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut internal_representation_count = 0u32;
+                result(
+                    pipeline_executable_properties_fn
+                        .get_pipeline_executable_internal_representations_khr(
+                            self.device.handle(),
+                            &pipeline_executable_info as *const _,
+                            &mut internal_representation_count as *mut _,
+                            ptr::null_mut(),
+                        ),
+                )?;
+                let mut internal_representations =
+                    vec![Default::default(); internal_representation_count as usize];
+                result(
+                    pipeline_executable_properties_fn
+                        .get_pipeline_executable_internal_representations_khr(
+                            self.device.handle(),
+                            &pipeline_executable_info as *const _,
+                            &mut internal_representation_count as *mut _,
+                            internal_representations.as_mut_ptr(),
+                        ),
+                )?;
+                println!("{:#?}", internal_representations);
+
+                let mut data_buffers = Vec::with_capacity(internal_representations.len());
+                for internal_representation in internal_representations.iter_mut() {
+                    if internal_representation.is_text != 0 {
+                        let mut buffer = vec![0u8; internal_representation.data_size];
+                        internal_representation.p_data = buffer.as_mut_ptr() as *mut _;
+                        data_buffers.push(buffer);
+                    }
+                }
+                result(
+                    pipeline_executable_properties_fn
+                        .get_pipeline_executable_internal_representations_khr(
+                            self.device.handle(),
+                            &pipeline_executable_info as *const _,
+                            &mut internal_representation_count as *mut _,
+                            internal_representations.as_mut_ptr(),
+                        ),
+                )?;
+                for internal_representation in internal_representations.iter_mut() {
+                    if internal_representation.is_text != 0 {
+                        let name =
+                            CStr::from_ptr(internal_representation.name.as_ptr() as *const _);
+                        let data = CStr::from_ptr(internal_representation.p_data as *const _);
+                        println!("{:#?}:", name);
+                        print!("{}", data.to_str()?);
+                    }
+                }
+            }
+
+            println!();
+            Ok(())
+        }
     }
 }
 

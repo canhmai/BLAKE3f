@@ -167,7 +167,9 @@ mod tests {
 
     #[test]
     fn task_sequence() -> Result<()> {
-        let mut instance = GpuInstance::new(3, TEST_BUFFER_SIZE)?.expect("No GPU found");
+        let mut instance =
+            GpuInstance::with_flags(3, TEST_BUFFER_SIZE, true)?.expect("No GPU found");
+        instance.dump_pipelines()?;
 
         let mut test = |data: &[u8]| -> Result<()> {
             let mut hasher = GpuHasher::new();
