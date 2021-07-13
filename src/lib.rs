@@ -116,6 +116,8 @@ pub mod traits;
 
 mod join;
 
+mod gpu;
+
 use arrayref::{array_mut_ref, array_ref};
 use arrayvec::{ArrayString, ArrayVec};
 use core::cmp;
