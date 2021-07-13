@@ -13,41 +13,49 @@ BLAKE3 is a cryptographic hash function that is:
 - **One algorithm with no variants**, which is fast on x86-64 and also
   on smaller architectures.
 
-The chart below shows BLAKE3's performance on modern server hardware, an
-Intel Cascade Lake-SP 8275CL processor:
+The [chart below](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/benchmarks/bar_chart.py)
+shows BLAKE3's performance on modern server hardware, an Intel Cascade
+Lake-SP 8275CL processor:
 
 <p align="center">
 <img src="media/speed.svg" alt="performance graph">
 </p>
 
 BLAKE3 is based on an optimized instance of the established hash
-function [BLAKE2](https://blake2.net), and on the [original Bao tree
+function [BLAKE2](https://blake2.net) and on the [original Bao tree
 mode](https://github.com/oconnor663/bao/blob/master/docs/spec_0.9.1.md).
-The BLAKE3 specifications and design rationale are available in the
-[BLAKE3
+The specifications and design rationale are available in the [BLAKE3
 paper](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf).
-The current version of [Bao](https://github.com/oconnor663/bao)
-implements verified streaming with BLAKE3.
+The default output size is 256 bits. The current version of
+[Bao](https://github.com/oconnor663/bao) implements verified streaming
+with BLAKE3.
 
-This repository provides the official Rust implementation of BLAKE3,
-with
+This repository is the official implementation of BLAKE3. It includes:
 
 * The [`blake3`](https://crates.io/crates/blake3) Rust crate, which
-  includes optimized SIMD implementations, using dynamic CPU feature
-  detection on x86. SSE4.1 and AVX2 support are implemented in Rust,
-  while AVX-512 and ARM NEON support are implemented in C and controlled
-  by the `c_avx512` and `c_neon` features. Multi-threading is
-  implemented with [Rayon](https://github.com/rayon-rs/rayon) and
-  controlled by the `rayon` feature. 
+  includes optimized SIMD implementations for SSE4.1, AVX2, AVX-512, and
+  NEON, with automatic runtime CPU feature detection on x86. The
+  optional `rayon` feature also enables multi-threading.
 
-* A simplified [reference
-  implementation](reference_impl/reference_impl.rs), which is portable
-  and `no_std`-compatible.
+* The [`b3sum`](https://crates.io/crates/b3sum) Rust crate, which
+  provides a command line interface. It uses multi-threading by default,
+  making it an order of magnitude faster than e.g. `sha256sum` on
+  typical desktop hardware.
 
-* The [`b3sum` sub-crate](./b3sum), which provides a command line
-  interface. You can install it with `cargo install b3sum`. It includes
-  multi-threading and AVX-512 support by default.
+* The [C implementation](c), which like the Rust implementation includes
+  SIMD code and runtime CPU feature detection on x86. Unlike the Rust
+  implementation, it's not currently multi-threaded. See
+  [`c/README.md`](c/README.md).
 
+* The [reference implementation](reference_impl/reference_impl.rs),
+  which is discussed in Section 5.1 of the [BLAKE3
+  paper](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf).
+  This implementation is much smaller and simpler than the optimized
+  ones above. If you want to see how BLAKE3 works, or you're writing a
+  port that doesn't need multi-threading or SIMD optimizations, start
+  here.
+
+* [![Actions Status](https://github.com/BLAKE3-team/BLAKE3/workflows/tests/badge.svg)](https://github.com/BLAKE3-team/BLAKE3/actions)
 
 BLAKE3 was designed by:
 
@@ -66,10 +74,7 @@ we recommend [Argon2](https://github.com/P-H-C/phc-winner-argon2).*
 
 ## Usage
 
-This repository provides the `b3sum` command line utility and the
-`blake3` Rust crate.
-
-### The b3sum utility
+### The `b3sum` utility
 
 The `b3sum` utility allows you to process files and data from standard
 input using BLAKE3 in any of its three modes.
@@ -151,6 +156,19 @@ let mut api_key = [0; 32];
 blake3::derive_key(API_CONTEXT, input_key, &mut api_key);
 assert!(email_key != api_key);
 ```
+
+### The C implementation
+
+See [`c/README.md`](c/README.md).
+
+### Other implementations
+
+We post links to third-party bindings and implementations on the
+[@BLAKE3team Twitter account](https://twitter.com/BLAKE3team) whenever
+we hear about them. Some highlights include [an optimized Go
+implementation](https://github.com/zeebo/blake3), [Wasm bindings for
+Node.js and browsers](https://github.com/connor4312/blake3), and [binary
+wheels for Python](https://github.com/oconnor663/blake3-py).
 
 ## Contributing
 

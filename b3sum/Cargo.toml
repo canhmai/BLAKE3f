@@ -1,6 +1,6 @@
 [package]
 name = "b3sum"
-version = "0.1.0"
+version = "0.3.1"
 authors = ["Jack O'Connor <oconnor663@gmail.com>"]
 description = "a command line implementation of the BLAKE3 hash function"
 repository = "https://github.com/BLAKE3-team/BLAKE3"
@@ -9,17 +9,19 @@ readme = "README.md"
 edition = "2018"
 
 [features]
-default = ["rayon", "c_avx512"]
-c_avx512 = ["blake3/c_avx512"]
-c_neon = ["blake3/c_neon"]
-rayon = ["blake3/rayon", "memmap"]
+neon = ["blake3/neon"]
+prefer_intrinsics = ["blake3/prefer_intrinsics"]
+pure = ["blake3/pure"]
+vulkan = ["ash"]
 
 [dependencies]
 anyhow = "1.0.25"
-blake3 = { version = "0.1", path = ".." }
+ash = { version = "0.31.0", optional = true }
+blake3 = { version = "0.3", path = "..", features = ["rayon"] }
 clap = { version = "2.33.0", default-features = false }
 hex = "0.4.0"
-memmap = { version = "0.7.0", optional = true }
+memmap = "0.7.0"
+rayon = "1.2.1"
 
 [dev-dependencies]
 assert_cmd = "0.12.0"

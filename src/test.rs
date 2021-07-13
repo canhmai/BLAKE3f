@@ -1,6 +1,7 @@
 use crate::{CVBytes, CVWords, IncrementCounter, BLOCK_LEN, CHUNK_LEN, OUT_LEN};
 use arrayref::array_ref;
 use arrayvec::ArrayVec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::usize;
 use rand::prelude::*;
 
@@ -25,11 +26,12 @@ pub const TEST_CASES: &[usize] = &[
     7 * CHUNK_LEN + 1,
     8 * CHUNK_LEN,
     8 * CHUNK_LEN + 1,
-    16 * CHUNK_LEN, // AVX512's bandwidth
-    31 * CHUNK_LEN, // 16 + 8 + 4 + 2 + 1
+    16 * CHUNK_LEN,  // AVX512's bandwidth
+    31 * CHUNK_LEN,  // 16 + 8 + 4 + 2 + 1
+    100 * CHUNK_LEN, // subtrees larger than MAX_SIMD_DEGREE chunks
 ];
 
-pub const TEST_CASES_MAX: usize = 31 * CHUNK_LEN;
+pub const TEST_CASES_MAX: usize = 100 * CHUNK_LEN;
 
 // There's a test to make sure these two are equal below.
 pub const TEST_KEY: CVBytes = *b"whats the Elvish word for friend";
@@ -152,7 +154,7 @@ pub fn test_hash_many_fn(
     crate::portable::hash_many(
         &parents,
         &TEST_KEY_WORDS,
-        0,
+        counter,
         IncrementCounter::No,
         crate::KEYED_HASH | crate::PARENT,
         0,
@@ -165,7 +167,7 @@ pub fn test_hash_many_fn(
         hash_many_parents_fn(
             &parents[..],
             &TEST_KEY_WORDS,
-            0,
+            counter,
             IncrementCounter::No,
             crate::KEYED_HASH | crate::PARENT,
             0,
@@ -267,15 +269,18 @@ fn test_compare_reference_impl() {
             let mut expected_out = [0; OUT];
             reference_hasher.finalize(&mut expected_out);
 
+            // all at once
             let test_out = crate::hash(input);
-            assert_eq!(&test_out, array_ref!(expected_out, 0, 32));
+            assert_eq!(test_out, *array_ref!(expected_out, 0, 32));
+            // incremental
             let mut hasher = crate::Hasher::new();
             hasher.update(input);
-            assert_eq!(&hasher.finalize(), array_ref!(expected_out, 0, 32));
-            assert_eq!(&hasher.finalize(), &test_out);
+            assert_eq!(hasher.finalize(), *array_ref!(expected_out, 0, 32));
+            assert_eq!(hasher.finalize(), test_out);
+            // xof
             let mut extended = [0; OUT];
             hasher.finalize_xof().fill(&mut extended);
-            assert_eq!(&extended[..], &expected_out[..]);
+            assert_eq!(extended[..], expected_out[..]);
         }
 
         // keyed
@@ -285,15 +290,18 @@ fn test_compare_reference_impl() {
             let mut expected_out = [0; OUT];
             reference_hasher.finalize(&mut expected_out);
 
+            // all at once
             let test_out = crate::keyed_hash(&TEST_KEY, input);
-            assert_eq!(&test_out, array_ref!(expected_out, 0, 32));
+            assert_eq!(test_out, *array_ref!(expected_out, 0, 32));
+            // incremental
             let mut hasher = crate::Hasher::new_keyed(&TEST_KEY);
             hasher.update(input);
-            assert_eq!(&hasher.finalize(), array_ref!(expected_out, 0, 32));
-            assert_eq!(&hasher.finalize(), &test_out);
+            assert_eq!(hasher.finalize(), *array_ref!(expected_out, 0, 32));
+            assert_eq!(hasher.finalize(), test_out);
+            // xof
             let mut extended = [0; OUT];
             hasher.finalize_xof().fill(&mut extended);
-            assert_eq!(&extended[..], &expected_out[..]);
+            assert_eq!(extended[..], expected_out[..]);
         }
 
         // derive_key
@@ -304,16 +312,19 @@ fn test_compare_reference_impl() {
             let mut expected_out = [0; OUT];
             reference_hasher.finalize(&mut expected_out);
 
+            // all at once
             let mut test_out = [0; OUT];
             crate::derive_key(context, input, &mut test_out);
-            assert_eq!(&test_out[..], &expected_out[..]);
+            assert_eq!(test_out[..], expected_out[..]);
+            // incremental
             let mut hasher = crate::Hasher::new_derive_key(context);
             hasher.update(input);
-            assert_eq!(&hasher.finalize(), array_ref!(expected_out, 0, 32));
-            assert_eq!(&hasher.finalize(), array_ref!(test_out, 0, 32));
+            assert_eq!(hasher.finalize(), *array_ref!(expected_out, 0, 32));
+            assert_eq!(hasher.finalize(), *array_ref!(test_out, 0, 32));
+            // xof
             let mut extended = [0; OUT];
             hasher.finalize_xof().fill(&mut extended);
-            assert_eq!(&extended[..], &expected_out[..]);
+            assert_eq!(extended[..], expected_out[..]);
         }
     }
 }
@@ -348,12 +359,13 @@ fn test_compare_update_multiple() {
             dbg!(second_update);
             let second_input = &input_buf[first_update..][..second_update];
             let total_input = &input_buf[..first_update + second_update];
+
             // Clone the hasher with first_update bytes already written, so
             // that the next iteration can reuse it.
             let mut test_hasher = test_hasher.clone();
             test_hasher.update(second_input);
-
-            assert_eq!(reference_hash(total_input), test_hasher.finalize());
+            let expected = reference_hash(total_input);
+            assert_eq!(expected, test_hasher.finalize());
         }
     }
 }
@@ -448,4 +460,94 @@ fn test_msg_schdule_permutation() {
     }
 
     assert_eq!(generated, crate::MSG_SCHEDULE);
+}
+
+#[test]
+fn test_reset() {
+    let mut hasher = crate::Hasher::new();
+    hasher.update(&[42; 3 * CHUNK_LEN + 7]);
+    hasher.reset();
+    hasher.update(&[42; CHUNK_LEN + 3]);
+    assert_eq!(hasher.finalize(), crate::hash(&[42; CHUNK_LEN + 3]));
+
+    let key = &[99; crate::KEY_LEN];
+    let mut keyed_hasher = crate::Hasher::new_keyed(key);
+    keyed_hasher.update(&[42; 3 * CHUNK_LEN + 7]);
+    keyed_hasher.reset();
+    keyed_hasher.update(&[42; CHUNK_LEN + 3]);
+    assert_eq!(
+        keyed_hasher.finalize(),
+        crate::keyed_hash(key, &[42; CHUNK_LEN + 3]),
+    );
+
+    let context = "BLAKE3 2020-02-12 10:20:58 reset test";
+    let mut kdf = crate::Hasher::new_derive_key(context);
+    kdf.update(&[42; 3 * CHUNK_LEN + 7]);
+    kdf.reset();
+    kdf.update(&[42; CHUNK_LEN + 3]);
+    let mut expected = [0; crate::OUT_LEN];
+    crate::derive_key(context, &[42; CHUNK_LEN + 3], &mut expected);
+    assert_eq!(kdf.finalize(), expected);
+}
+
+#[test]
+#[cfg(feature = "rayon")]
+fn test_update_with_rayon_join() {
+    let mut input = [0; TEST_CASES_MAX];
+    paint_test_input(&mut input);
+    let rayon_hash = crate::Hasher::new()
+        .update_with_join::<crate::join::RayonJoin>(&input)
+        .finalize();
+    assert_eq!(crate::hash(&input), rayon_hash);
+}
+
+// Test that the length values given to Join::join are what they're supposed to
+// be.
+#[test]
+fn test_join_lengths() {
+    // Use static atomics to let us safely get a couple of values in and out of
+    // CustomJoin. This avoids depending on std, though it assumes that this
+    // thread will only run once in the lifetime of the runner process.
+    static SINGLE_THREAD_LEN: AtomicUsize = AtomicUsize::new(0);
+    static CUSTOM_JOIN_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    // Use an input that's exactly (simd_degree * CHUNK_LEN) + 1. That should
+    // guarantee that compress_subtree_wide does exactly one split, with the
+    // last byte on the right side. Note that it we used
+    // Hasher::update_with_join, we would end up buffering that last byte,
+    // rather than splitting and joining it.
+    let single_thread_len = crate::platform::Platform::detect().simd_degree() * CHUNK_LEN;
+    SINGLE_THREAD_LEN.store(single_thread_len, Ordering::SeqCst);
+    let mut input_buf = [0; 2 * crate::platform::MAX_SIMD_DEGREE * CHUNK_LEN];
+    paint_test_input(&mut input_buf);
+    let input = &input_buf[..single_thread_len + 1];
+
+    enum CustomJoin {}
+
+    impl crate::join::Join for CustomJoin {
+        fn join<A, B, RA, RB>(oper_a: A, oper_b: B, len_a: usize, len_b: usize) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            let prev_calls = CUSTOM_JOIN_CALLS.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(prev_calls, 0);
+            assert_eq!(len_a, SINGLE_THREAD_LEN.load(Ordering::SeqCst));
+            assert_eq!(len_b, 1);
+            (oper_a(), oper_b())
+        }
+    }
+
+    let mut out_buf = [0; crate::platform::MAX_SIMD_DEGREE_OR_2 * CHUNK_LEN];
+    crate::compress_subtree_wide::<CustomJoin>(
+        input,
+        crate::IV,
+        0,
+        0,
+        crate::platform::Platform::detect(),
+        &mut out_buf,
+    );
+    assert_eq!(CUSTOM_JOIN_CALLS.load(Ordering::SeqCst), 1);
 }

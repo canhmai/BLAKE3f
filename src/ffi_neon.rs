@@ -1,7 +1,5 @@
 use crate::{CVWords, IncrementCounter, BLOCK_LEN, OUT_LEN};
 
-pub const DEGREE: usize = 4;
-
 // Unsafe because this may only be called on platforms supporting NEON.
 pub unsafe fn hash_many<A: arrayvec::Array<Item = u8>>(
     inputs: &[&A],
@@ -77,7 +75,7 @@ mod test {
 
     #[test]
     fn test_hash_many() {
-        // This entire file is gated on feature="c_neon", so NEON support is
+        // This entire file is gated on feature="neon", so NEON support is
         // assumed here.
         crate::test::test_hash_many_fn(hash_many, hash_many);
     }
